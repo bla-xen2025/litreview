@@ -2,13 +2,13 @@ import pandas as pd
 import numpy as np
 import os
 import argparse
-from litreview.visualization import (
+from legacy.litreview.visualization import (
     graph_distribution, 
     graph_sources, 
     plot_class_distributions_by_model, 
     get_overall_classes
 )
-from litreview.utils import load_config
+from legacy.litreview.utils import load_config
 
 def filter_and_save_subsets(df, processed_dir, labels_map):
     """Specific filtering logic updated to use labels from config."""

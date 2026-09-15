@@ -4,44 +4,45 @@ Orchestrates the full literature review workflow:
 fetch -> clean -> BERTopic discovery -> zero-shot validation -> statistics -> report
 """
 
+import json
 import os
 import re
-import json
 
 import pandas as pd
 
-from litreview.config import PipelineConfig
-from litreview.fetchers.zotero import ZoteroFetcher
 from litreview.analyzers.bertopic import (
     BERTopicFitter,
     TopicDistributionAnalyzer,
-    TopicWordExtractor,
     TopicRepresentativeDocs,
+    TopicWordExtractor,
 )
+from litreview.analyzers.bertopic._utils import normalize_topic_sizes
 from litreview.analyzers.zeroshot import ZeroShotAnalyzer
+from litreview.config import PipelineConfig
+from litreview.fetchers.zotero import ZoteroFetcher
 from litreview.statistics import (
     compute_corpus_stats,
-    compute_topic_coverage,
-    compute_gap_analysis,
     compute_cross_analysis,
+    compute_gap_analysis,
+    compute_topic_coverage,
 )
 from litreview.visualization import (
-    plot_year_distribution,
-    plot_zeroshot_label_counts,
-    plot_zeroshot_confidence_by_label,
+    plot_bertopic_representative_docs,
     plot_bertopic_sizes,
     plot_bertopic_topic_words,
-    plot_bertopic_representative_docs,
-    plot_topic_coverage,
-    plot_gap_analysis,
-    plot_confidence_distribution,
-    plot_topic_label_heatmap,
     plot_colabel_matrix,
-    plot_topic_confidence_scatter,
+    plot_confidence_distribution,
+    plot_gap_analysis,
     plot_method_overlap,
-    plot_topic_network,
-    plot_topic_label_distribution,
+    plot_topic_confidence_scatter,
+    plot_topic_coverage,
     plot_topic_distribution_by_year,
+    plot_topic_label_distribution,
+    plot_topic_label_heatmap,
+    plot_topic_network,
+    plot_year_distribution,
+    plot_zeroshot_confidence_by_label,
+    plot_zeroshot_label_counts,
 )
 
 
@@ -67,34 +68,43 @@ class ReviewPipeline:
         )
         self.zeroshot_analyzer = ZeroShotAnalyzer(config.zeroshot)
 
-    def run(self) -> "Report":
+    def run(self, df: pd.DataFrame | None = None) -> "Report":
         """Execute the full pipeline and return a Report.
+
+        Args:
+            df: Optional input corpus. When omitted, papers are fetched from Zotero.
 
         Returns:
             Report with DataFrame, statistics, and analysis results.
         """
-        # 1. Fetch
-        df = self.fetcher.fetch(self.config.zotero.collection_names)
+        # 1. Fetch unless a caller supplied an input corpus.
+        if df is None:
+            df = self.fetcher.fetch(self.config.zotero.collection_names)
 
         # 2. Clean
         df = self._clean(df)
 
-        abstracts = df["Abstract Note"].dropna()
+        abstracts = df["Abstract Note"]
+        abstract_mask = abstracts.fillna("").astype(str).str.strip().ne("")
+        valid_abstracts = abstracts[abstract_mask]
 
         # 3. BERTopic — fit model, then run configured analyses
         bertopic_results = {}
         topic_results = pd.DataFrame(index=df.index)
         bertopic_model = None
+        bertopic_ran = False
 
-        if (not self.skip_bertopic
-                and self.config.bertopic.compute
-                and len(abstracts) > 0):
+        if (
+            not self.skip_bertopic
+            and self.config.bertopic.compute
+            and len(valid_abstracts) > 0
+        ):
             # BERTopic needs a minimum number of documents to produce
             # meaningful clusters (UMAP needs n_neighbors >= 2, HDBSCAN
             # needs at least a few points per cluster).
-            if len(abstracts) < 10:
+            if len(valid_abstracts) < 10:
                 total_papers = len(df)
-                non_empty = len(abstracts)
+                non_empty = len(valid_abstracts)
                 raise ValueError(
                     f"Only {non_empty} of {total_papers} papers have abstracts. "
                     "BERTopic requires at least 10 documents with non-empty abstracts. "
@@ -105,13 +115,15 @@ class ReviewPipeline:
                 )
             # Phase 1: Fit the model (always runs when compute=True)
             fitter = BERTopicFitter(self.config.bertopic)
-            fitter.fit(abstracts)
+            fitter.fit(valid_abstracts)
             bertopic_model = fitter.topic_model
-            bertopic_results = {k: v for k, v in fitter.results.items()
-                                if k != "topic_model"}
-            topic_results = pd.DataFrame(
-                {"topic": fitter.topic_assignments}, index=df.index
-            )
+            bertopic_results = {
+                k: v for k, v in fitter.results.items() if k != "topic_model"
+            }
+            topic_results = pd.DataFrame({"topic": -1}, index=df.index)
+            topic_results.loc[valid_abstracts.index, "topic"] = fitter.topic_assignments
+            bertopic_results["topic_assignments"] = topic_results["topic"].to_numpy()
+            bertopic_ran = True
 
             # Phase 2: Run configured analyses, each receiving the fitted model
             analysis_map = {
@@ -125,15 +137,19 @@ class ReviewPipeline:
                     continue
                 if analysis_name == "distribution":
                     analyzer = analyzer_cls(
-                        bertopic_model, self.config.bertopic,
+                        bertopic_model,
+                        self.config.bertopic,
                         top_n_topics=self.config.bertopic.top_n_topics,
                         window=self.config.bertopic.distribution_window,
                         stride=self.config.bertopic.distribution_stride,
                     )
                 else:
                     analyzer = analyzer_cls(bertopic_model)
-                analyzer.fit(abstracts)
-                analysis_df = analyzer.transform(abstracts)
+                analysis_texts = (
+                    abstracts if analysis_name == "distribution" else valid_abstracts
+                )
+                analyzer.fit(analysis_texts)
+                analysis_df = analyzer.transform(analysis_texts)
                 topic_results = pd.concat([topic_results, analysis_df], axis=1)
                 bertopic_results.update(analyzer.results)
 
@@ -146,9 +162,7 @@ class ReviewPipeline:
 
         # 5. Compute statistics
         corpus_stats = compute_corpus_stats(df)
-        bertopic_enabled = (not self.skip_bertopic
-                            and self.config.bertopic.compute)
-        if not bertopic_enabled:
+        if not bertopic_ran:
             topic_coverage = {"coverage": {}, "num_topics": 0}
             gap_analysis = {"gaps": [], "num_gaps": 0}
             cross_analysis = {"agreement": 0.0}
@@ -175,12 +189,38 @@ class ReviewPipeline:
 
     @staticmethod
     def _clean(df: pd.DataFrame) -> pd.DataFrame:
-        """Normalize text and remove duplicates by title."""
-        df["Title"] = df["Title"].apply(ReviewPipeline._normalize_text)
-        df["Abstract Note"] = df["Abstract Note"].apply(ReviewPipeline._normalize_text)
+        """Validate the corpus and remove duplicates without altering source text."""
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Pipeline input must be a pandas DataFrame")
 
-        # Dedup by normalized title only
-        df = df.drop_duplicates(subset=["Title"], keep="first")
+        required_columns = {"Title", "Abstract Note"}
+        missing_columns = sorted(required_columns - set(df.columns))
+        if missing_columns:
+            raise ValueError(
+                "Input data is missing required columns: " + ", ".join(missing_columns)
+            )
+
+        df = df.copy()
+        optional_defaults = {
+            "Publication Year": pd.NA,
+            "DOI": pd.NA,
+            "Source": "CSV",
+            "Item Type": "unknown",
+        }
+        for column, default in optional_defaults.items():
+            if column not in df:
+                df[column] = default
+
+        df["Title Normalized"] = df["Title"].apply(ReviewPipeline._normalize_text)
+        normalized_doi = df["DOI"].apply(ReviewPipeline._normalize_doi)
+        dedupe_key = normalized_doi.where(
+            normalized_doi.ne(""), "title:" + df["Title Normalized"]
+        )
+        empty_key = dedupe_key.eq("title:")
+        dedupe_key.loc[empty_key] = [
+            f"untitled-row:{position}" for position in range(int(empty_key.sum()))
+        ]
+        df = df.loc[~dedupe_key.duplicated(keep="first")]
 
         df.reset_index(drop=True, inplace=True)
         return df
@@ -191,6 +231,15 @@ class ReviewPipeline:
         if pd.isna(text):
             return ""
         return re.sub(r"\W+", " ", str(text)).strip().lower()
+
+    @staticmethod
+    def _normalize_doi(doi) -> str:
+        """Normalize common DOI representations for identity matching."""
+        if pd.isna(doi):
+            return ""
+        value = str(doi).strip().lower()
+        value = re.sub(r"^(?:doi:\s*|https?://(?:dx\.)?doi\.org/)", "", value)
+        return value.rstrip(".,; ")
 
 
 class Report:
@@ -245,7 +294,8 @@ class Report:
             self.zeroshot_results, os.path.join(path, "zeroshot_label_counts.png")
         )
         plot_zeroshot_confidence_by_label(
-            self.zeroshot_results, os.path.join(path, "zeroshot_confidence_by_label.png")
+            self.zeroshot_results,
+            os.path.join(path, "zeroshot_confidence_by_label.png"),
         )
         plot_confidence_distribution(
             self.zeroshot_results, os.path.join(path, "confidence_distribution.png")
@@ -259,17 +309,21 @@ class Report:
             self.bertopic_results, os.path.join(path, "bertopic_topic_words.png")
         )
         plot_bertopic_representative_docs(
-            self.bertopic_results, os.path.join(path, "bertopic_representative_docs.png")
+            self.bertopic_results,
+            os.path.join(path, "bertopic_representative_docs.png"),
         )
 
         # Cross-analysis
-        plot_topic_coverage(self.topic_coverage, os.path.join(path, "topic_coverage.png"))
+        plot_topic_coverage(
+            self.topic_coverage, os.path.join(path, "topic_coverage.png")
+        )
         plot_gap_analysis(self.gap_analysis, os.path.join(path, "gap_analysis.png"))
 
         # Topic × Label alignment
         plot_topic_label_heatmap(
-            self.bertopic_results, self.zeroshot_results,
-            os.path.join(path, "topic_label_heatmap.png")
+            self.bertopic_results,
+            self.zeroshot_results,
+            os.path.join(path, "topic_label_heatmap.png"),
         )
 
         # Label co-occurrence
@@ -279,8 +333,9 @@ class Report:
 
         # New: Topic size vs confidence
         plot_topic_confidence_scatter(
-            self.bertopic_results, self.zeroshot_results,
-            os.path.join(path, "topic_confidence_scatter.png")
+            self.bertopic_results,
+            self.zeroshot_results,
+            os.path.join(path, "topic_confidence_scatter.png"),
         )
 
         # New: Method overlap
@@ -290,20 +345,23 @@ class Report:
 
         # New: Topic network
         plot_topic_network(
-            self.bertopic_results, self.zeroshot_results,
-            os.path.join(path, "topic_network.png")
+            self.bertopic_results,
+            self.zeroshot_results,
+            os.path.join(path, "topic_network.png"),
         )
 
         # New: Per-topic label distribution
         plot_topic_label_distribution(
-            self.bertopic_results, self.zeroshot_results,
-            os.path.join(path, "topic_label_distribution.png")
+            self.bertopic_results,
+            self.zeroshot_results,
+            os.path.join(path, "topic_label_distribution.png"),
         )
 
         # Topic distribution by year (soft assignments)
         plot_topic_distribution_by_year(
-            self.bertopic_results, self.df,
-            os.path.join(path, "topic_distribution_by_year.png")
+            self.bertopic_results,
+            self.df,
+            os.path.join(path, "topic_distribution_by_year.png"),
         )
 
     def summary(self) -> str:
@@ -318,31 +376,32 @@ class Report:
             f"Outlier papers: {self.bertopic_results.get('outlier_count', 0)}",
         ]
 
-        topic_sizes = self.bertopic_results.get("topic_sizes", {})
-
-        # Handle DataFrame input — convert to dict
-        if isinstance(topic_sizes, pd.DataFrame):
-            if topic_sizes.empty:
-                topic_sizes = {}
-            else:
-                topic_sizes = topic_sizes.to_dict(orient="list")
-                topic_sizes = {k: v[0] if isinstance(v, list) else v for k, v in topic_sizes.items()}
+        topic_sizes = normalize_topic_sizes(
+            self.bertopic_results.get("topic_sizes", {})
+        )
 
         if topic_sizes:
             non_outlier = {k: v for k, v in topic_sizes.items() if k != -1}
             if non_outlier:
                 largest = max(non_outlier, key=non_outlier.get)
                 smallest = min(non_outlier, key=non_outlier.get)
-                lines.append(f"Largest topic: T{largest} ({non_outlier[largest]} papers)")
-                lines.append(f"Smallest topic: T{smallest} ({non_outlier[smallest]} papers)")
+                lines.append(
+                    f"Largest topic: T{largest} ({non_outlier[largest]} papers)"
+                )
+                lines.append(
+                    f"Smallest topic: T{smallest} ({non_outlier[smallest]} papers)"
+                )
 
         lines.append("")
         lines.append("--- Zero-Shot Classification ---")
         label_counts = self.zeroshot_results.get("label_counts", {})
         if label_counts:
-            sorted_labels = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)
+            sorted_labels = sorted(
+                label_counts.items(), key=lambda x: x[1], reverse=True
+            )
+            total_papers = self.corpus_stats["total_papers"]
             for label, count in sorted_labels:
-                pct = count / self.corpus_stats["total_papers"] * 100
+                pct = count / total_papers * 100 if total_papers else 0.0
                 lines.append(f"  {label}: {count} papers ({pct:.1f}%)")
 
         if self.gap_analysis.get("gaps"):

@@ -1,30 +1,35 @@
 """Tests for config module."""
 
-import os
+import pytest
+
 from litreview.config import (
-    PipelineConfig,
-    ZoteroConfig,
     BERTopicConfig,
+    PipelineConfig,
     ZeroShotConfig,
+    ZoteroConfig,
     load_config,
 )
 
 
 class TestZoteroConfig:
     def test_from_config(self):
-        cfg = ZoteroConfig.from_config({
-            "library_type": "user",
-            "collection_names": ["my_collection"],
-        })
+        cfg = ZoteroConfig.from_config(
+            {
+                "library_type": "user",
+                "collection_names": ["my_collection"],
+            }
+        )
         assert cfg.library_type == "user"
         assert cfg.collection_names == ["my_collection"]
 
     def test_from_config_legacy_collection_name(self):
         """Backwards compatibility: single collection_name key."""
-        cfg = ZoteroConfig.from_config({
-            "library_type": "user",
-            "collection_name": "my_collection",
-        })
+        cfg = ZoteroConfig.from_config(
+            {
+                "library_type": "user",
+                "collection_name": "my_collection",
+            }
+        )
         assert cfg.library_type == "user"
         assert cfg.collection_names == ["my_collection"]
 
@@ -36,11 +41,13 @@ class TestZoteroConfig:
 
 class TestBERTopicConfig:
     def test_from_config(self):
-        cfg = BERTopicConfig.from_config({
-            "embedding_model": "all-mpnet-base-v2",
-            "min_topic_size": 5,
-            "seed_topics": [["deep learning"], ["optimization"]],
-        })
+        cfg = BERTopicConfig.from_config(
+            {
+                "embedding_model": "all-mpnet-base-v2",
+                "min_topic_size": 5,
+                "seed_topics": [["deep learning"], ["optimization"]],
+            }
+        )
         assert cfg.embedding_model == "all-mpnet-base-v2"
         assert cfg.min_topic_size == 5
         assert cfg.seed_topics == [["deep learning"], ["optimization"]]
@@ -58,10 +65,18 @@ class TestBERTopicConfig:
         assert cfg.distribution_stride == 2
 
     def test_from_config_with_candidate_labels(self):
-        cfg = BERTopicConfig.from_config({
-            "candidate_labels": {"BLT": "bedload transport", "GPU": "gpu accelerated"},
-        })
-        assert cfg.candidate_labels == {"BLT": "bedload transport", "GPU": "gpu accelerated"}
+        cfg = BERTopicConfig.from_config(
+            {
+                "candidate_labels": {
+                    "BLT": "bedload transport",
+                    "GPU": "gpu accelerated",
+                },
+            }
+        )
+        assert cfg.candidate_labels == {
+            "BLT": "bedload transport",
+            "GPU": "gpu accelerated",
+        }
 
     def test_from_config_compute_false(self):
         cfg = BERTopicConfig.from_config({"compute": False})
@@ -72,25 +87,45 @@ class TestBERTopicConfig:
         assert cfg.analyses == ["distribution", "words"]
 
     def test_from_config_auto_seed_words(self):
-        cfg = BERTopicConfig.from_config({
-            "candidate_labels": {"A": "label a", "B": "label b"},
-        })
+        cfg = BERTopicConfig.from_config(
+            {
+                "candidate_labels": {"A": "label a", "B": "label b"},
+            }
+        )
         assert cfg.seed_words == ["label a", "label b"]
 
     def test_from_config_explicit_seed_words(self):
-        cfg = BERTopicConfig.from_config({
-            "candidate_labels": {"A": "label a"},
-            "seed_words": ["custom", "words"],
-        })
+        cfg = BERTopicConfig.from_config(
+            {
+                "candidate_labels": {"A": "label a"},
+                "seed_words": ["custom", "words"],
+            }
+        )
         assert cfg.seed_words == ["custom", "words"]
+
+    def test_from_config_preserves_clustering_overrides(self):
+        cfg = BERTopicConfig.from_config(
+            {
+                "umap_kwargs": {"n_neighbors": 8},
+                "hdbscan_kwargs": {"min_samples": 4},
+            }
+        )
+        assert cfg.umap_kwargs == {"n_neighbors": 8}
+        assert cfg.hdbscan_kwargs == {"min_samples": 4}
+
+    def test_from_config_rejects_unknown_analysis(self):
+        with pytest.raises(ValueError, match="unknown"):
+            BERTopicConfig.from_config({"analyses": ["unknown"]})
 
 
 class TestZeroShotConfig:
     def test_from_config(self):
-        cfg = ZeroShotConfig.from_config({
-            "threshold": 0.7,
-            "candidate_labels": {"A": "Label A", "B": "Label B"},
-        })
+        cfg = ZeroShotConfig.from_config(
+            {
+                "threshold": 0.7,
+                "candidate_labels": {"A": "Label A", "B": "Label B"},
+            }
+        )
         assert cfg.threshold == 0.7
         assert cfg.candidate_labels == {"A": "Label A", "B": "Label B"}
 
@@ -114,12 +149,17 @@ class TestPipelineConfig:
         assert isinstance(cfg, PipelineConfig)
         assert cfg.paths["plots"] == "results/plots"
 
+    def test_maps_legacy_top_level_models_and_labels(self, tmp_path):
+        path = tmp_path / "legacy.yaml"
+        path.write_text("models: [model-a]\nlabels: {A: alpha}\n")
+
+        cfg = PipelineConfig.from_file(path)
+
+        assert cfg.zeroshot.models == ["model-a"]
+        assert cfg.zeroshot.candidate_labels == {"A": "alpha"}
+
 
 class TestLoadConfig:
     def test_load_config_nonexistent(self):
-        try:
+        with pytest.raises(FileNotFoundError):
             load_config("nonexistent.yaml")
-        except FileNotFoundError:
-            pass  # Expected
-        else:
-            assert False, "Expected FileNotFoundError"

@@ -1,58 +1,94 @@
-"""Tests for visualization module."""
+"""Tests for visualization inputs and generated files."""
 
-import os
+import numpy as np
+import pandas as pd
+from matplotlib.axes import Axes
+
 from litreview.visualization import (
-    plot_year_distribution,
+    plot_colabel_matrix,
+    plot_confidence_distribution,
+    plot_gap_analysis,
     plot_source_distribution,
     plot_topic_coverage,
-    plot_gap_analysis,
-    plot_confidence_distribution,
+    plot_year_distribution,
 )
 
 
-class TestPlotYearDistribution:
-    def test_basic(self, sample_df, temp_output_dir):
-        path = plot_year_distribution(sample_df, output_dir=temp_output_dir)
-        assert os.path.exists(path)
-        assert path.endswith(".png")
+def test_plot_year_distribution(sample_df, tmp_path):
+    path = tmp_path / "years.png"
+
+    plot_year_distribution(sample_df, str(path))
+
+    assert path.is_file()
 
 
-class TestPlotSourceDistribution:
-    def test_basic(self, sample_df, temp_output_dir):
-        path = plot_source_distribution(sample_df, output_dir=temp_output_dir)
-        assert os.path.exists(path)
-        assert path.endswith(".png")
+def test_source_distribution_counts_every_paper(monkeypatch, tmp_path):
+    source_df = pd.DataFrame({"Source": ["A", "A", "A", "B", "B"]})
+    widths = []
+    original_barh = Axes.barh
+
+    def capture_barh(axis, y, width, *args, **kwargs):
+        widths.extend(np.asarray(width).tolist())
+        return original_barh(axis, y, width, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "barh", capture_barh)
+
+    plot_source_distribution(source_df, str(tmp_path / "sources.png"))
+
+    assert sorted(widths) == [2, 3]
 
 
-class TestPlotTopicCoverage:
-    def test_basic(self, temp_output_dir):
-        topic_results = {
-            "topic_sizes": {0: 10, 1: 5, 2: 3},
-            "topic_words": {0: ["test", "paper"], 1: ["study", "data"], 2: ["method", "analysis"]},
-        }
-        path = plot_topic_coverage(topic_results, output_dir=temp_output_dir)
-        assert os.path.exists(path)
-        assert path.endswith(".png")
+def test_plot_topic_coverage(tmp_path):
+    path = tmp_path / "coverage.png"
+
+    plot_topic_coverage({"topic_sizes": {0: 10, 1: 5}}, str(path))
+
+    assert path.is_file()
 
 
-class TestPlotGapAnalysis:
-    def test_basic(self, temp_output_dir):
-        gaps = {
-            "seed_no_matches": ["seed1"],
-            "seed_few_matches": ["seed2"],
-            "large_outliers": [10],
-        }
-        path = plot_gap_analysis(gaps, output_dir=temp_output_dir)
-        assert os.path.exists(path)
-        assert path.endswith(".png")
+def test_plot_gap_analysis(tmp_path):
+    path = tmp_path / "gaps.png"
+    gaps = {
+        "gaps": [{"seed": "missing", "severity": "high", "papers": 0}],
+        "num_gaps": 1,
+    }
+
+    plot_gap_analysis(gaps, str(path))
+
+    assert path.is_file()
 
 
-class TestPlotConfidenceDistribution:
-    def test_basic(self, sample_df, temp_output_dir):
-        validation_results = {
-            "classifications": sample_df[["title", "abstract"]].head(5),
-            "label_counts": {"A": 3, "B": 2},
-        }
-        path = plot_confidence_distribution(validation_results, output_dir=temp_output_dir)
-        assert os.path.exists(path)
-        assert path.endswith(".png")
+def test_plot_confidence_distribution(tmp_path):
+    path = tmp_path / "confidence.png"
+    results = {"classifications": pd.DataFrame({"score": [0.9, 0.6, 0.2]})}
+
+    plot_confidence_distribution(results, str(path))
+
+    assert path.is_file()
+
+
+def test_colabel_matrix_contains_off_diagonal_cooccurrence(monkeypatch, tmp_path):
+    matrices = []
+    original_imshow = Axes.imshow
+
+    def capture_imshow(axis, values, *args, **kwargs):
+        matrices.append(np.asarray(values).copy())
+        return original_imshow(axis, values, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "imshow", capture_imshow)
+    results = {
+        "classifications": pd.DataFrame(
+            {
+                "labels": [["alpha", "beta"], ["alpha"], ["beta"]],
+                "label_scores": [
+                    {"alpha": 0.9, "beta": 0.8},
+                    {"alpha": 0.7},
+                    {"beta": 0.6},
+                ],
+            }
+        )
+    }
+
+    plot_colabel_matrix(results, str(tmp_path / "colabel.png"))
+
+    assert matrices[0].tolist() == [[0, 1], [1, 0]]

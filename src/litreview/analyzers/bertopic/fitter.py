@@ -13,28 +13,52 @@ receive the fitted model from this class.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 import nltk
 import numpy as np
 import pandas as pd
-import torch
 
+from litreview.analyzers.bertopic._utils import normalize_topic_sizes
 from litreview.config import BERTopicConfig
 
-# Download NLTK stopwords on first import
-try:
-    nltk.data.find("corpora/stopwords")
-except LookupError:
-    nltk.download("stopwords", quiet=True)
 
-# English stop words — NLTK list minus domain-relevant prepositions
-_STOP_WORDS = set(nltk.corpus.stopwords.words("english"))
-_STOP_WORDS -= {
-    "across", "along", "around", "above", "among", "behind", "beneath",
-    "beside", "between", "beyond", "down", "during", "into", "near",
-    "onto", "through", "throughout", "toward", "under", "underneath",
-    "upon", "within", "without",
-}
+@lru_cache(maxsize=1)
+def _english_stop_words() -> set[str]:
+    """Load local NLTK stopwords without performing network I/O on import."""
+    try:
+        words = set(nltk.corpus.stopwords.words("english"))
+    except LookupError as exc:
+        raise RuntimeError(
+            "NLTK stopwords are not installed. Run "
+            "`python -m nltk.downloader stopwords` during environment setup."
+        ) from exc
+    words -= {
+        "across",
+        "along",
+        "around",
+        "above",
+        "among",
+        "behind",
+        "beneath",
+        "beside",
+        "between",
+        "beyond",
+        "down",
+        "during",
+        "into",
+        "near",
+        "onto",
+        "through",
+        "throughout",
+        "toward",
+        "under",
+        "underneath",
+        "upon",
+        "within",
+        "without",
+    }
+    return words
 
 
 class BERTopicFitter:
@@ -76,8 +100,11 @@ class BERTopicFitter:
         Returns:
             Text with stop words removed, words separated by spaces.
         """
-        words = re.findall(r"\b\w+\b", text.lower())
-        return " ".join(w for w in words if w not in _STOP_WORDS)
+        if pd.isna(text) or not str(text).strip():
+            return ""
+        words = re.findall(r"\b\w+\b", str(text).lower())
+        stop_words = _english_stop_words()
+        return " ".join(w for w in words if w not in stop_words)
 
     def _enrich_texts(self, texts: pd.Series) -> list[str]:
         """Prepend candidate labels and remove stop words for better embedding context.
@@ -97,12 +124,13 @@ class BERTopicFitter:
             return [self._remove_stopwords(t) for t in texts.tolist()]
 
         label_prefix = " | ".join(labels)
-        return [
-            f"{label_prefix}: {self._remove_stopwords(text)}"
-            for text in texts.tolist()
-        ]
+        enriched = []
+        for text in texts.tolist():
+            normalized = self._remove_stopwords(text)
+            enriched.append(f"{label_prefix}: {normalized}" if normalized else "")
+        return enriched
 
-    def fit(self, texts: pd.Series) -> "BERTopicFitter":
+    def fit(self, texts: pd.Series) -> BERTopicFitter:
         """Create and fit a BERTopic model.
 
         Args:
@@ -111,20 +139,14 @@ class BERTopicFitter:
         Returns:
             self for chaining.
         """
+        import torch
         from bertopic import BERTopic
         from bertopic.vectorizers import ClassTfidfTransformer
         from hdbscan import HDBSCAN
         from sentence_transformers import SentenceTransformer
-        import torch
         from umap import UMAP
 
-        # Robust GPU detection
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif torch.cuda.device_count() > 0:
-            device = "cuda"
-        else:
-            device = "cpu"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
         embedding_model = SentenceTransformer(
             self.config.embedding_model, device=device
@@ -164,7 +186,9 @@ class BERTopicFitter:
             raise ValueError(
                 f"Embedding model '{self.config.embedding_model}' produced all-zero "
                 "embeddings for all {} valid texts. Use a dedicated embedding model "
-                "such as 'sentence-transformers/all-MiniLM-L6-v2'.".format(len(valid_texts))
+                "such as 'sentence-transformers/all-MiniLM-L6-v2'.".format(
+                    len(valid_texts)
+                )
             )
 
         num_samples = len(valid_texts)
@@ -173,19 +197,27 @@ class BERTopicFitter:
         n_neighbors = min(5, max(2, num_samples - 1))
         n_components = min(5, max(2, num_samples - 1))
 
-        # Safe defaults for UMAP
-        umap_kwargs = dict(
-            n_neighbors=n_neighbors,
-            n_components=n_components,
-            min_dist=0.0,
-            metric="cosine",
-            **self.config.umap_kwargs,
+        # Apply caller overrides, then cap sample-dependent values safely.
+        umap_kwargs = {
+            "n_neighbors": n_neighbors,
+            "n_components": n_components,
+            "min_dist": 0.0,
+            "metric": "cosine",
+        }
+        umap_kwargs.update(self.config.umap_kwargs)
+        umap_kwargs["n_neighbors"] = min(
+            max(2, int(umap_kwargs["n_neighbors"])), num_samples - 1
+        )
+        umap_kwargs["n_components"] = min(
+            max(2, int(umap_kwargs["n_components"])), max(2, num_samples - 2)
         )
 
-        # Set safe defaults for HDBSCAN
-        hdbscan_kwargs = dict(
-            min_samples=min(1, max(1, num_samples - 1)),
-            **self.config.hdbscan_kwargs,
+        hdbscan_kwargs = {
+            "min_samples": min(self.config.min_topic_size, num_samples - 1)
+        }
+        hdbscan_kwargs.update(self.config.hdbscan_kwargs)
+        hdbscan_kwargs["min_samples"] = min(
+            max(1, int(hdbscan_kwargs["min_samples"])), num_samples - 1
         )
 
         umap_model = UMAP(**umap_kwargs)
@@ -218,12 +250,13 @@ class BERTopicFitter:
         self._topic_probs = topic_probs
 
         # Map assignments back to the original index order (-1 = filtered out)
-        full_assignments = np.full(len(enriched_texts), -1, dtype=self.topic_assignments.dtype)
+        full_assignments = np.full(
+            len(enriched_texts), -1, dtype=self.topic_assignments.dtype
+        )
         full_assignments[original_indices] = self.topic_assignments
         self.topic_assignments = full_assignments
 
         return self
-
 
     @property
     def results(self) -> dict:
@@ -236,8 +269,8 @@ class BERTopicFitter:
         if self.topic_model is None or self.topic_assignments is None:
             return {}
 
-        topic_sizes = self.topic_model.get_topic_freq()
-        outlier_count = topic_sizes.get(-1, 0) if -1 in topic_sizes else 0
+        topic_sizes = normalize_topic_sizes(self.topic_model.get_topic_freq())
+        outlier_count = topic_sizes.get(-1, 0)
 
         return {
             "topic_model": self.topic_model,

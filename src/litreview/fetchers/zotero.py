@@ -1,9 +1,10 @@
 """Zotero API client for fetching papers."""
 
-from pyzotero import zotero
-import pandas as pd
 import re
-import sys
+from typing import ClassVar
+
+import pandas as pd
+from pyzotero import zotero
 
 from litreview.fetchers.base import Fetcher
 
@@ -64,7 +65,15 @@ class ZoteroFetcher(Fetcher):
             raise
 
     # Only these item types are scholarly works with abstracts
-    _PAPER_TYPES = {"journalArticle", "conferencePaper"}
+    _PAPER_TYPES: ClassVar[set[str]] = {"journalArticle", "conferencePaper"}
+    _COLUMNS: ClassVar[list[str]] = [
+        "Title",
+        "Abstract Note",
+        "Publication Year",
+        "DOI",
+        "Source",
+        "Item Type",
+    ]
 
     @staticmethod
     def _to_dataframe(items: list) -> pd.DataFrame:
@@ -93,24 +102,27 @@ class ZoteroFetcher(Fetcher):
                     year = int(match.group())
 
             # Extract DOI from extra fields (e.g.  doi = 10.xxxx/xxxx)
-            doi = None
+            doi = data.get("DOI") or None
             extra = data.get("extra", "")
-            if extra:
+            if not doi and extra:
                 doi_match = re.search(r"doi\s*=\s*(10\.\S+)", extra, re.IGNORECASE)
                 if doi_match:
                     doi = doi_match.group(1)
 
-            processed_data.append({
-                "Title": data.get("title", ""),
-                "Abstract Note": data.get("abstractNote", ""),
-                "Publication Year": year,
-                "DOI": doi,
-                "Source": "Zotero",
-                "Item Type": item_type,
-            })
+            processed_data.append(
+                {
+                    "Title": data.get("title", ""),
+                    "Abstract Note": data.get("abstractNote", ""),
+                    "Publication Year": year,
+                    "DOI": doi,
+                    "Source": "Zotero",
+                    "Item Type": item_type,
+                }
+            )
 
-        df = pd.DataFrame(processed_data)
+        df = pd.DataFrame.from_records(processed_data, columns=ZoteroFetcher._COLUMNS)
         if not df.empty:
-            df = df[df["Abstract Note"].str.strip() != ""].copy()
+            has_abstract = df["Abstract Note"].fillna("").astype(str).str.strip().ne("")
+            df = df.loc[has_abstract].copy()
 
         return df

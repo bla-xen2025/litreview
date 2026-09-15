@@ -4,18 +4,18 @@ from litreview.analyzers.base import Analyzer
 from litreview.analyzers.bertopic import (
     BERTopicFitter,
     TopicDistributionAnalyzer,
-    TopicWordExtractor,
     TopicRepresentativeDocs,
+    TopicWordExtractor,
 )
 from litreview.analyzers.bertopic_wrapper import BERTopicAnalyzer  # deprecated wrapper
 from litreview.analyzers.zeroshot import ZeroShotAnalyzer
 
 __all__ = [
     "Analyzer",
+    "BERTopicAnalyzer",  # deprecated — use BERTopicFitter + analysis modules
     "BERTopicFitter",
     "TopicDistributionAnalyzer",
-    "TopicWordExtractor",
     "TopicRepresentativeDocs",
-    "BERTopicAnalyzer",  # deprecated — use BERTopicFitter + analysis modules
+    "TopicWordExtractor",
     "ZeroShotAnalyzer",
 ]

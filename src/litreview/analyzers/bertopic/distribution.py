@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from litreview.analyzers.base import Analyzer
+from litreview.analyzers.bertopic._utils import normalize_topic_sizes
 from litreview.config import BERTopicConfig
 
 
@@ -46,8 +47,9 @@ class TopicDistributionAnalyzer(Analyzer):
         self.window = window
         self.stride = stride
         self._distribution_matrix: np.ndarray | None = None
+        self._valid_mask: np.ndarray | None = None
 
-    def fit(self, texts: pd.Series) -> "TopicDistributionAnalyzer":
+    def fit(self, texts: pd.Series) -> TopicDistributionAnalyzer:
         """Compute topic distributions via approximate_distribution.
 
         Args:
@@ -56,9 +58,18 @@ class TopicDistributionAnalyzer(Analyzer):
         Returns:
             self for chaining.
         """
-        text_list = texts.dropna().astype(str).tolist()
+        valid_mask = (
+            texts.notna() & texts.fillna("").astype(str).str.strip().ne("")
+        ).to_numpy()
+        self._valid_mask = valid_mask
+        text_list = texts.iloc[np.flatnonzero(valid_mask)].astype(str).tolist()
         if not text_list:
-            n_topics = self.topic_model.get_topic_freq().shape[0] if self.topic_model else 0
+            topic_sizes = (
+                normalize_topic_sizes(self.topic_model.get_topic_freq())
+                if self.topic_model
+                else {}
+            )
+            n_topics = len([topic for topic in topic_sizes if topic != -1])
             self._distribution_matrix = np.zeros((len(texts), n_topics))
             return self
 
@@ -69,15 +80,14 @@ class TopicDistributionAnalyzer(Analyzer):
             calculate_tokens=False,
         )
 
-        # Ensure matrix has the right shape
-        n_expected = len(texts)
-        if dist_matrix.shape[0] < n_expected:
-            pad = np.zeros((n_expected - dist_matrix.shape[0], dist_matrix.shape[1]))
-            dist_matrix = np.vstack([dist_matrix, pad])
-        elif dist_matrix.shape[0] > n_expected:
-            dist_matrix = dist_matrix[:n_expected]
-
-        self._distribution_matrix = dist_matrix
+        if dist_matrix.shape[0] != len(text_list):
+            raise RuntimeError(
+                "BERTopic returned a distribution row count that does not match "
+                "the non-empty input texts"
+            )
+        full_matrix = np.zeros((len(texts), dist_matrix.shape[1]))
+        full_matrix[np.flatnonzero(valid_mask)] = dist_matrix
+        self._distribution_matrix = full_matrix
         return self
 
     def transform(self, texts: pd.Series) -> pd.DataFrame:
@@ -99,6 +109,11 @@ class TopicDistributionAnalyzer(Analyzer):
         for i in range(len(texts)):
             row: dict = {}
             dist = self._distribution_matrix[i]
+            if self._valid_mask is not None and not self._valid_mask[i]:
+                row["dominant_topic"] = -1
+                row["dominant_prob"] = 0.0
+                rows.append(row)
+                continue
             sorted_idx = np.argsort(-dist)[: self.top_n_topics]
             for rank, idx in enumerate(sorted_idx):
                 tid = topic_ids[idx] if idx < n_topics else -1
