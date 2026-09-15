@@ -46,6 +46,7 @@ class TopicWordExtractor:
             Empty DataFrame (for API compatibility).
         """
         import pandas as pd
+
         return pd.DataFrame()
 
     def fit_transform(self, texts=None):

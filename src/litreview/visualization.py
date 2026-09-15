@@ -1,14 +1,16 @@
 """Visualization functions for literature review analysis."""
 
+import math
+
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
-import os
-
-import pandas as pd
 import numpy as np
+import pandas as pd
 
+from litreview.analyzers.bertopic._utils import normalize_topic_sizes
 
 # ---------------------------------------------------------------------------
 # Shared color palette for topics
@@ -27,8 +29,7 @@ def _topic_color(topic_id: str | int, topic_names: dict | None = None) -> str:
     return _TOPIC_PALETTE[idx]
 
 
-def _topic_legend(ax, topics: list[str | int],
-                  topic_names: dict | None = None) -> None:
+def _topic_legend(ax, topics: list[str | int], topic_names: dict | None = None) -> None:
     """Add a compact legend mapping topic IDs to their top labels.
 
     Parameters
@@ -39,34 +40,68 @@ def _topic_legend(ax, topics: list[str | int],
     """
     if topic_names is None:
         topic_names = {}
-    handles, labels = [], []
+    handles = []
     for tid in topics:
         tid_str = str(tid)
         label = topic_names.get(tid_str, f"T{tid_str}")
         color = _topic_color(tid, topic_names)
         handles.append(mpatches.Patch(color=color, label=label))
     # Limit legend width so it doesn't dwarf the plot
-    ax.legend(handles=handles, title="Topics", loc="center left",
-              bbox_to_anchor=(1.02, 0.5), fontsize=7, title_fontsize=8,
-              ncol=min(2, len(handles)), frameon=True)
+    ax.legend(
+        handles=handles,
+        title="Topics",
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        fontsize=7,
+        title_fontsize=8,
+        ncol=min(2, len(handles)),
+        frameon=True,
+    )
 
 
-def _normalize_topic_sizes(topic_sizes) -> dict:
-    """Normalize topic_sizes to a dict, handling pandas DataFrame input.
+def _classification_label_rows(classifications: pd.DataFrame) -> pd.DataFrame:
+    """Expand per-paper multi-label results into one row per selected label."""
+    rows = []
+    for paper_position, (_, classification) in enumerate(classifications.iterrows()):
+        selected_labels = classification.get("labels")
+        label_scores = classification.get("label_scores")
+        if not isinstance(selected_labels, list):
+            selected_labels = (
+                [classification.get("label")]
+                if classification.get("classified", True)
+                else []
+            )
+        if not isinstance(label_scores, dict):
+            label_scores = {
+                classification.get("label"): classification.get("score", 0.0)
+            }
+        for label in selected_labels:
+            if label and label != "unknown":
+                rows.append(
+                    {
+                        "paper_position": paper_position,
+                        "label": label,
+                        "score": float(label_scores.get(label, 0.0)),
+                    }
+                )
+    return pd.DataFrame(rows, columns=["paper_position", "label", "score"])
 
-    The pipeline may store topic_sizes as either a dict or a DataFrame
-    depending on how BERTopic results are serialized.
-    """
-    if isinstance(topic_sizes, pd.DataFrame):
-        if topic_sizes.empty:
-            return {}
-        topic_sizes = topic_sizes.to_dict(orient="list")
-        topic_sizes = {k: v[0] if isinstance(v, list) else v for k, v in topic_sizes.items()}
-    return topic_sizes if topic_sizes else {}
+
+def _topic_label_rows(topic_assignments, classifications: pd.DataFrame) -> pd.DataFrame:
+    """Attach hard topic assignments to expanded multi-label rows."""
+    if len(topic_assignments) != len(classifications):
+        raise ValueError("Topic assignments and classifications must have equal length")
+    rows = _classification_label_rows(classifications)
+    if rows.empty:
+        return pd.DataFrame(columns=["paper_position", "label", "score", "topic"])
+    topics = np.asarray(topic_assignments)
+    rows["topic"] = topics[rows["paper_position"].to_numpy()]
+    return rows
 
 
-def plot_zeroshot_label_counts(zeroshot_results: dict, path: str,
-                               top_n: int | None = None) -> None:
+def plot_zeroshot_label_counts(
+    zeroshot_results: dict, path: str, top_n: int | None = None
+) -> None:
     """Plot horizontal bar chart of zero-shot label counts, ordered by count.
 
     Args:
@@ -87,8 +122,13 @@ def plot_zeroshot_label_counts(zeroshot_results: dict, path: str,
     ax.set_xlabel("Number of Papers")
     ax.set_title("Papers per Zero-Shot Label")
     for bar in ax.patches:
-        ax.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height() / 2,
-                str(int(bar.get_width())), va="center", fontsize=8)
+        ax.text(
+            bar.get_width() + 0.1,
+            bar.get_y() + bar.get_height() / 2,
+            str(int(bar.get_width())),
+            va="center",
+            fontsize=8,
+        )
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -104,10 +144,15 @@ def plot_zeroshot_confidence_by_label(zeroshot_results: dict, path: str) -> None
     if classifications is None or len(classifications) == 0:
         return
 
-    fig, ax = plt.subplots(figsize=(max(8, len(classifications["label"].unique()) * 0.7), 6))
-    label_order = classifications["label"].value_counts().index.tolist()
-    data = [classifications[classifications["label"] == lbl]["score"].values
-            for lbl in label_order]
+    label_rows = _classification_label_rows(classifications)
+    if label_rows.empty:
+        return
+    label_order = label_rows["label"].value_counts().index.tolist()
+    fig, ax = plt.subplots(figsize=(max(8, len(label_order) * 0.7), 6))
+    data = [
+        label_rows.loc[label_rows["label"] == label, "score"].values
+        for label in label_order
+    ]
 
     bp = ax.boxplot(data, tick_labels=label_order, patch_artist=True, showmeans=True)
     for patch in bp["boxes"]:
@@ -126,7 +171,7 @@ def plot_bertopic_sizes(bertopic_results: dict, path: str) -> None:
 
     Outliers (topic -1) are excluded.
     """
-    topic_sizes = _normalize_topic_sizes(bertopic_results.get("topic_sizes", {}))
+    topic_sizes = normalize_topic_sizes(bertopic_results.get("topic_sizes", {}))
 
     # Exclude outlier topic (-1)
     topic_sizes = {k: v for k, v in topic_sizes.items() if k != -1}
@@ -141,16 +186,22 @@ def plot_bertopic_sizes(bertopic_results: dict, path: str) -> None:
     ax.set_xlabel("Number of Papers")
     ax.set_title("BERTopic Topic Sizes")
     for bar in ax.patches:
-        ax.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height() / 2,
-                str(int(bar.get_width())), va="center", fontsize=8)
+        ax.text(
+            bar.get_width() + 0.1,
+            bar.get_y() + bar.get_height() / 2,
+            str(int(bar.get_width())),
+            va="center",
+            fontsize=8,
+        )
     _topic_legend(ax, df.index.tolist())
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
-def plot_bertopic_topic_words(bertopic_results: dict, path: str,
-                              top_words_per_topic: int = 10) -> None:
+def plot_bertopic_topic_words(
+    bertopic_results: dict, path: str, top_words_per_topic: int = 10
+) -> None:
     """Plot top words per BERTopic topic as a horizontal bar grid.
 
     Each topic gets its own subplot with its top N words.
@@ -187,8 +238,9 @@ def plot_bertopic_topic_words(bertopic_results: dict, path: str,
     plt.close(fig)
 
 
-def plot_bertopic_representative_docs(bertopic_results: dict, path: str,
-                                      max_docs_per_topic: int = 3) -> None:
+def plot_bertopic_representative_docs(
+    bertopic_results: dict, path: str, max_docs_per_topic: int = 3
+) -> None:
     """Plot representative document titles per BERTopic topic.
 
     Shows the most representative paper title for each topic.
@@ -215,8 +267,9 @@ def plot_bertopic_representative_docs(bertopic_results: dict, path: str,
 
     ax.barh(y_pos, [1] * len(df), color=patch_colors)
     ax.set_yticks(y_pos)
-    ax.set_yticklabels([f"{r['Topic']}: {r['Title'][:60]}..." for r in df["Title"]],
-                       fontsize=8)
+    ax.set_yticklabels(
+        [f"{r['Topic']}: {r['Title'][:60]}..." for r in df["Title"]], fontsize=8
+    )
     ax.set_xlabel("Representative Documents")
     ax.set_title("BERTopic: Representative Documents per Topic")
     ax.invert_yaxis()
@@ -235,7 +288,9 @@ def plot_year_distribution(df: pd.DataFrame, path: str) -> None:
         return
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(years, bins=range(int(years.min()), int(years.max()) + 2), edgecolor="black")
+    ax.hist(
+        years, bins=range(int(years.min()), int(years.max()) + 2), edgecolor="black"
+    )
     ax.set_xlabel("Year")
     ax.set_ylabel("Number of Papers")
     ax.set_title("Publication Year Distribution")
@@ -246,7 +301,7 @@ def plot_year_distribution(df: pd.DataFrame, path: str) -> None:
 
 def plot_source_distribution(df: pd.DataFrame, path: str) -> None:
     """Plot publication source (journal/conference) distribution bar chart."""
-    sources = df["Source"].dropna().drop_duplicates()
+    sources = df["Source"].dropna()
     if len(sources) == 0:
         return
 
@@ -254,8 +309,12 @@ def plot_source_distribution(df: pd.DataFrame, path: str) -> None:
     if len(source_counts) == 0:
         return
 
-    fig, ax = plt.subplots(figsize=(max(8, len(source_counts) * 0.5),
-                                     max(4, min(len(source_counts), 15) * 0.4)))
+    fig, ax = plt.subplots(
+        figsize=(
+            max(8, len(source_counts) * 0.5),
+            max(4, min(len(source_counts), 15) * 0.4),
+        )
+    )
     source_counts.plot(kind="barh", ax=ax, color="steelblue")
     ax.set_xlabel("Number of Papers")
     ax.set_title("Publication Source Distribution")
@@ -266,7 +325,7 @@ def plot_source_distribution(df: pd.DataFrame, path: str) -> None:
 
 def plot_topic_coverage(coverage: dict, path: str) -> None:
     """Plot papers per topic bar chart."""
-    topic_sizes = _normalize_topic_sizes(coverage.get("topic_sizes", {}))
+    topic_sizes = normalize_topic_sizes(coverage.get("topic_sizes", {}))
     if not topic_sizes:
         return
 
@@ -291,8 +350,14 @@ def plot_gap_analysis(gap_data: dict, path: str) -> None:
     gaps = gap_data.get("gaps", [])
     if not gaps:
         fig, ax = plt.subplots(figsize=(8, 4))
-        ax.text(0.5, 0.5, "No significant gaps identified",
-                ha="center", va="center", fontsize=14)
+        ax.text(
+            0.5,
+            0.5,
+            "No significant gaps identified",
+            ha="center",
+            va="center",
+            fontsize=14,
+        )
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.axis("off")
@@ -302,13 +367,14 @@ def plot_gap_analysis(gap_data: dict, path: str) -> None:
         return
 
     severities = [g.get("severity", "low") for g in gaps]
-    severity_order = {"low": 0, "medium": 1, "high": 2}
-    severity_values = [severity_order.get(s, 0) for s in severities]
     colors = {"low": "green", "medium": "orange", "high": "red"}
 
     fig, ax = plt.subplots(figsize=(max(8, len(gaps) * 2), 4))
-    ax.barh(range(len(gaps)), [1] * len(gaps),
-            color=[colors.get(s, "gray") for s in severities])
+    ax.barh(
+        range(len(gaps)),
+        [1] * len(gaps),
+        color=[colors.get(s, "gray") for s in severities],
+    )
     ax.set_yticks(range(len(gaps)))
     ax.set_yticklabels([g.get("seed", g.get("description", "unknown")) for g in gaps])
     ax.set_xlabel("Severity")
@@ -335,8 +401,9 @@ def plot_confidence_distribution(zeroshot_results: dict, path: str) -> None:
     plt.close(fig)
 
 
-def plot_topic_label_heatmap(bertopic_results: dict, zeroshot_results: dict,
-                              path: str) -> None:
+def plot_topic_label_heatmap(
+    bertopic_results: dict, zeroshot_results: dict, path: str
+) -> None:
     """Heatmap of BERTopic topics × zero-shot labels.
 
     Shows which domain labels are most common in each unsupervised topic,
@@ -347,19 +414,18 @@ def plot_topic_label_heatmap(bertopic_results: dict, zeroshot_results: dict,
     if topic_assignments is None or classifications is None:
         return
 
-    # Build topic × label count matrix
-    topic_ids = sorted(set(t for t in topic_assignments if t != -1))
+    # Build topic × label count matrix from every threshold-qualified label.
+    topic_ids = sorted({topic for topic in topic_assignments if topic != -1})
     if not topic_ids:
         return
 
-    # Combine topic assignments with classifications so we can group by topic
-    combined = pd.DataFrame({
-        "topic": topic_assignments,
-        "label": classifications["label"],
-    })
+    combined = _topic_label_rows(topic_assignments, classifications)
+    if combined.empty:
+        return
 
-    label_counts = combined.groupby("topic")[
-        "label"].value_counts().unstack(fill_value=0)
+    label_counts = (
+        combined.groupby("topic")["label"].value_counts().unstack(fill_value=0)
+    )
     # Filter to topics that exist
     label_counts = label_counts.loc[label_counts.index.isin(topic_ids)]
     if label_counts.empty:
@@ -369,8 +435,12 @@ def plot_topic_label_heatmap(bertopic_results: dict, zeroshot_results: dict,
     label_totals = label_counts.sum()
     label_counts = label_counts[label_totals.sort_values(ascending=False).index]
 
-    fig, ax = plt.subplots(figsize=(max(8, label_counts.shape[1] * 0.6),
-                                     max(5, label_counts.shape[0] * 0.5)))
+    fig, ax = plt.subplots(
+        figsize=(
+            max(8, label_counts.shape[1] * 0.6),
+            max(5, label_counts.shape[0] * 0.5),
+        )
+    )
     im = ax.imshow(label_counts.values, cmap="Blues", aspect="auto")
     ax.set_xticks(range(len(label_counts.columns)))
     ax.set_xticklabels(label_counts.columns, rotation=45, ha="right", fontsize=8)
@@ -398,26 +468,24 @@ def plot_colabel_matrix(zeroshot_results: dict, path: str) -> None:
     if classifications is None or len(classifications) == 0:
         return
 
-    # Build paper × label matrix.
-    # The classifications DataFrame has index=paper_id, columns=label/score/classified.
-    # Each paper gets exactly one label, so we pivot the index against the label column.
-    labels = classifications["label"].unique()
-    if len(labels) > 25:
-        top_labels = classifications["label"].value_counts().head(25).index
-        classifications = classifications[classifications["label"].isin(top_labels)]
-        labels = top_labels
-
-    paper_label = classifications.pivot_table(
-        index=classifications.index, columns="label", aggfunc="size", fill_value=0)
-    # Only keep papers that have labels
-    paper_label = paper_label.loc[paper_label.sum(axis=1) > 0]
+    label_rows = _classification_label_rows(classifications)
+    if label_rows.empty:
+        return
+    label_counts = label_rows["label"].value_counts()
+    selected_labels = label_counts.head(25).index
+    label_rows = label_rows[label_rows["label"].isin(selected_labels)]
+    paper_label = pd.crosstab(label_rows["paper_position"], label_rows["label"]).clip(
+        upper=1
+    )
+    labels = paper_label.columns.tolist()
 
     # Compute co-occurrence matrix
     cooccurrence = paper_label.values.T @ paper_label.values
     np.fill_diagonal(cooccurrence, 0)  # zero out diagonal for cleaner view
 
-    fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.5),
-                                     max(6, len(labels) * 0.5)))
+    fig, ax = plt.subplots(
+        figsize=(max(8, len(labels) * 0.5), max(6, len(labels) * 0.5))
+    )
     im = ax.imshow(cooccurrence, cmap="Reds", aspect="auto")
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
@@ -432,13 +500,14 @@ def plot_colabel_matrix(zeroshot_results: dict, path: str) -> None:
     plt.close(fig)
 
 
-def plot_topic_confidence_scatter(bertopic_results: dict, zeroshot_results: dict,
-                                   path: str) -> None:
+def plot_topic_confidence_scatter(
+    bertopic_results: dict, zeroshot_results: dict, path: str
+) -> None:
     """Scatter plot: topic size vs mean classification confidence.
 
     Reveals whether larger topics are more or less confidently classified.
     """
-    topic_sizes = _normalize_topic_sizes(bertopic_results.get("topic_sizes", {}))
+    topic_sizes = normalize_topic_sizes(bertopic_results.get("topic_sizes", {}))
     topic_assignments = bertopic_results.get("topic_assignments")
     classifications = zeroshot_results.get("classifications")
     if classifications is None or topic_assignments is None:
@@ -449,10 +518,12 @@ def plot_topic_confidence_scatter(bertopic_results: dict, zeroshot_results: dict
         return
 
     # Merge topic assignments with classifications so we can group by topic
-    combined = pd.DataFrame({
-        "topic": topic_assignments,
-        "score": classifications["score"],
-    })
+    combined = pd.DataFrame(
+        {
+            "topic": topic_assignments,
+            "score": classifications["score"],
+        }
+    )
 
     # Mean confidence per topic
     topic_conf = combined.groupby("topic")["score"].mean()
@@ -465,8 +536,13 @@ def plot_topic_confidence_scatter(bertopic_results: dict, zeroshot_results: dict
     colors = [_topic_color(t) for t in topics]
     ax.scatter(sizes, confs, s=100, alpha=0.8, color=colors, edgecolors="black")
     for i, t in enumerate(topics):
-        ax.annotate(f"T{t}", (sizes[i], confs[i]), fontsize=7,
-                    xytext=(5, 5), textcoords="offset points")
+        ax.annotate(
+            f"T{t}",
+            (sizes[i], confs[i]),
+            fontsize=7,
+            xytext=(5, 5),
+            textcoords="offset points",
+        )
     ax.set_xlabel("Topic Size (number of papers)")
     ax.set_ylabel("Mean Classification Confidence")
     ax.set_title("Topic Size vs Classification Confidence")
@@ -498,7 +574,9 @@ def plot_method_overlap(cross_analysis: dict, path: str) -> None:
     ax.bar(labels, values, color=colors, edgecolor="white", linewidth=1.5)
     for i, (label, val) in enumerate(zip(labels, values)):
         if val > 0:
-            ax.text(i, val + 0.5, str(int(val)), ha="center", fontsize=12, fontweight="bold")
+            ax.text(
+                i, val + 0.5, str(int(val)), ha="center", fontsize=12, fontweight="bold"
+            )
     ax.set_ylabel("Number of Papers")
     ax.set_title("BERTopic vs Zero-Shot Classification Overlap")
     fig.tight_layout()
@@ -506,8 +584,9 @@ def plot_method_overlap(cross_analysis: dict, path: str) -> None:
     plt.close(fig)
 
 
-def plot_topic_network(bertopic_results: dict, zeroshot_results: dict,
-                        path: str, min_cooccurrence: int = 2) -> None:
+def plot_topic_network(
+    bertopic_results: dict, zeroshot_results: dict, path: str, min_cooccurrence: int = 2
+) -> None:
     """Network-style visualization of topic connections via shared labels.
 
     Topics are nodes; edges connect topics that share zero-shot labels.
@@ -515,26 +594,24 @@ def plot_topic_network(bertopic_results: dict, zeroshot_results: dict,
     """
     topic_assignments = bertopic_results.get("topic_assignments")
     classifications = zeroshot_results.get("classifications")
-    topic_sizes = _normalize_topic_sizes(bertopic_results.get("topic_sizes", {}))
+    topic_sizes = normalize_topic_sizes(bertopic_results.get("topic_sizes", {}))
     if topic_assignments is None or classifications is None:
         return
 
-    topic_ids = sorted(set(t for t in topic_assignments if t != -1))
+    topic_ids = sorted({topic for topic in topic_assignments if topic != -1})
     if len(topic_ids) < 2:
         return
 
-    # Build topic × label co-occurrence
-    combined = pd.DataFrame({
-        "topic": topic_assignments,
-        "label": classifications["label"],
-    })
+    combined = _topic_label_rows(topic_assignments, classifications)
+    if combined.empty:
+        return
     topic_labels = combined.groupby("topic")["label"].apply(set)
     topic_labels = topic_labels[topic_labels.index.isin(topic_ids)]
 
     # Compute pairwise label overlap between topics
     edges = []
     for i, t1 in enumerate(topic_ids):
-        for t2 in topic_ids[i + 1:]:
+        for t2 in topic_ids[i + 1 :]:
             labels1 = topic_labels.get(t1, set())
             labels2 = topic_labels.get(t2, set())
             overlap = len(labels1 & labels2)
@@ -548,8 +625,11 @@ def plot_topic_network(bertopic_results: dict, zeroshot_results: dict,
             return
         fig, ax = plt.subplots(figsize=(10, 5))
         keys = list(topic_sizes.keys())
-        ax.bar([f"T{k}" for k in keys], [topic_sizes[k] for k in keys],
-               color=[_topic_color(k) for k in keys])
+        ax.bar(
+            [f"T{k}" for k in keys],
+            [topic_sizes[k] for k in keys],
+            color=[_topic_color(k) for k in keys],
+        )
         ax.set_xlabel("Topic")
         ax.set_ylabel("Number of Papers")
         ax.set_title("Topic Network (no connections found)")
@@ -560,7 +640,6 @@ def plot_topic_network(bertopic_results: dict, zeroshot_results: dict,
         return
 
     # Draw network using matplotlib (no graphviz dependency)
-    import math
     n_topics = len(topic_ids)
     # Compute node positions using a simple force-directed layout approximation
     # Use circular layout as baseline
@@ -576,20 +655,37 @@ def plot_topic_network(bertopic_results: dict, zeroshot_results: dict,
     fig, ax = plt.subplots(figsize=(max(8, n_topics * 0.8), max(6, n_topics * 0.8)))
     # Draw edges
     for t1, t2, weight in edges:
-        ax.plot([positions[t1][0], positions[t2][0]],
-                [positions[t1][1], positions[t2][1]],
-                "gray", alpha=min(weight * 0.3, 1.0), linewidth=weight * 0.5)
+        ax.plot(
+            [positions[t1][0], positions[t2][0]],
+            [positions[t1][1], positions[t2][1]],
+            "gray",
+            alpha=min(weight * 0.3, 1.0),
+            linewidth=weight * 0.5,
+        )
     # Draw nodes — color-coded by topic
     node_x = [positions[t][0] for t in topic_ids]
     node_y = [positions[t][1] for t in topic_ids]
     node_sizes = [topic_sizes.get(t, 1) * 20 for t in topic_ids]
     node_colors = [_topic_color(t) for t in topic_ids]
-    ax.scatter(node_x, node_y, s=node_sizes, color=node_colors, alpha=0.7,
-               edgecolors="black", linewidth=0.5)
+    ax.scatter(
+        node_x,
+        node_y,
+        s=node_sizes,
+        color=node_colors,
+        alpha=0.7,
+        edgecolors="black",
+        linewidth=0.5,
+    )
     for t in topic_ids:
-        ax.annotate(f"T{t}", (positions[t][0], positions[t][1]),
-                    ha="center", va="center", fontsize=8, fontweight="bold",
-                    color="white")
+        ax.annotate(
+            f"T{t}",
+            (positions[t][0], positions[t][1]),
+            ha="center",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+            color="white",
+        )
     ax.set_xlim(-1.2, 1.2)
     ax.set_ylim(-1.2, 1.2)
     ax.set_aspect("equal")
@@ -597,10 +693,11 @@ def plot_topic_network(bertopic_results: dict, zeroshot_results: dict,
 
     # Build legend: topic ID + top label
     # Compute most common label per topic from the combined data
-    label_counts_per_topic = combined.groupby("topic")["label"].value_counts()
-    top_labels_map = {}
-    for topic, group in label_counts_per_topic.groupby("topic"):
-        top_labels_map[topic] = group.index[0]
+    top_labels_map = (
+        combined.groupby("topic")["label"]
+        .agg(lambda values: values.value_counts().index[0])
+        .to_dict()
+    )
 
     legend_handles = []
     legend_labels = []
@@ -608,13 +705,24 @@ def plot_topic_network(bertopic_results: dict, zeroshot_results: dict,
         size = topic_sizes.get(t, 1) * 20
         top_label = top_labels_map.get(t, "unknown")
         color = _topic_color(t)
-        legend_handles.append(plt.scatter([], [], s=size, c=color,
-                                          edgecolors="black", linewidth=0.5, alpha=0.7))
+        legend_handles.append(
+            plt.scatter(
+                [], [], s=size, c=color, edgecolors="black", linewidth=0.5, alpha=0.7
+            )
+        )
         legend_labels.append(f"T{t}: {top_label}")
     if legend_handles:
-        ax.legend(legend_handles, legend_labels, title="Topics", loc="center left",
-                  bbox_to_anchor=(1.02, 0.5), fontsize=8, title_fontsize=9,
-                  frameon=True, fancybox=False)
+        ax.legend(
+            legend_handles,
+            legend_labels,
+            title="Topics",
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            fontsize=8,
+            title_fontsize=9,
+            frameon=True,
+            fancybox=False,
+        )
 
     ax.set_title("Topic Network (edges = shared labels)")
     fig.tight_layout()
@@ -622,8 +730,9 @@ def plot_topic_network(bertopic_results: dict, zeroshot_results: dict,
     plt.close(fig)
 
 
-def plot_topic_label_distribution(bertopic_results: dict, zeroshot_results: dict,
-                                   path: str) -> None:
+def plot_topic_label_distribution(
+    bertopic_results: dict, zeroshot_results: dict, path: str
+) -> None:
     """Stacked bar chart: dominant zero-shot labels per BERTopic topic.
 
     Shows the label composition of each topic, revealing what domain
@@ -631,19 +740,18 @@ def plot_topic_label_distribution(bertopic_results: dict, zeroshot_results: dict
     """
     topic_assignments = bertopic_results.get("topic_assignments")
     classifications = zeroshot_results.get("classifications")
-    topic_sizes = _normalize_topic_sizes(bertopic_results.get("topic_sizes", {}))
+    topic_sizes = normalize_topic_sizes(bertopic_results.get("topic_sizes", {}))
     if topic_assignments is None or classifications is None:
         return
 
-    topic_ids = sorted(set(t for t in topic_assignments if t != -1))
+    topic_ids = sorted({topic for topic in topic_assignments if topic != -1})
     if not topic_ids:
         return
 
-    # Count labels per topic
-    combined = pd.DataFrame({
-        "topic": topic_assignments,
-        "label": classifications["label"],
-    })
+    combined = _topic_label_rows(topic_assignments, classifications)
+    combined = combined[combined["topic"].isin(topic_ids)]
+    if combined.empty:
+        return
     label_per_topic = combined.groupby("topic")["label"].value_counts()
     # Keep only top labels per topic (by count)
     top_labels_per_topic = label_per_topic.groupby("topic").head(5)
@@ -657,20 +765,26 @@ def plot_topic_label_distribution(bertopic_results: dict, zeroshot_results: dict
     topic_sizes = {k: v for k, v in topic_sizes.items() if k != -1}
     pivot = pivot.reindex(sorted(pivot.index, key=lambda t: topic_sizes.get(t, 0)))
 
-    ax = pivot.plot(kind="barh", stacked=True, figsize=(max(10, len(pivot) * 1.2),
-                                                         max(5, len(pivot) * 0.6)),
-                    colormap="tab20")
+    ax = pivot.plot(
+        kind="barh",
+        stacked=True,
+        figsize=(max(10, len(pivot) * 1.2), max(5, len(pivot) * 0.6)),
+        colormap="tab20",
+    )
     ax.set_xlabel("Number of Papers")
     ax.set_ylabel("BERTopic Topic")
     ax.set_title("Label Distribution per Topic")
     handles, labels = ax.get_legend_handles_labels()
     if handles:
-        ax.legend(handles, labels, title="Label", bbox_to_anchor=(1.02, 1),
-                  fontsize=7, loc="upper left")
+        ax.legend(
+            handles,
+            labels,
+            title="Label",
+            bbox_to_anchor=(1.02, 1),
+            fontsize=7,
+            loc="upper left",
+        )
     fig = ax.get_figure()
-    # Add topic legend on the right
-    topic_ids = [int(k) for k in pivot.index]
-    _topic_legend(ax, topic_ids)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -714,8 +828,12 @@ def plot_topic_distribution_by_year(
         return
 
     topic_ids = [int(c) for c in pivot.columns]
-    ax = pivot.plot(kind="area", stacked=True, figsize=(max(12, len(pivot) * 0.3), 6),
-                    colormap="tab20")
+    ax = pivot.plot(
+        kind="area",
+        stacked=True,
+        figsize=(max(12, len(pivot) * 0.3), 6),
+        colormap="tab20",
+    )
     ax.set_xlabel("Year")
     ax.set_ylabel("Mean Topic Probability")
     ax.set_title("Topic Distribution by Year")

@@ -9,6 +9,8 @@ Usage:
 
 from __future__ import annotations
 
+from litreview.analyzers.bertopic._utils import normalize_topic_sizes
+
 
 class TopicRepresentativeDocs:
     """Extract representative documents per topic from a fitted BERTopic model.
@@ -46,6 +48,7 @@ class TopicRepresentativeDocs:
             Empty DataFrame (for API compatibility).
         """
         import pandas as pd
+
         return pd.DataFrame()
 
     def fit_transform(self, texts=None):
@@ -67,26 +70,13 @@ class TopicRepresentativeDocs:
         Returns:
             Dict mapping topic_id -> list of (document_text, score) tuples.
         """
-        topic_representatives = {}
-        for topic_id in sorted(set(t for t in dir(self.topic_model) if True)):
-            pass  # We'll iterate over actual topics below
-
-        # Get all topic IDs from the model
-        try:
-            topic_freq = self.topic_model.get_topic_freq()
-            topic_ids = topic_freq.index.tolist()
-        except Exception:
-            topic_ids = []
-
-        for topic_id in topic_ids:
-            if topic_id == -1:
-                continue
-            try:
-                reps = self.topic_model.representative_documents_per_topic(
-                    topic_id, documents=[], n=self.n_documents
-                )
-                topic_representatives[topic_id] = reps
-            except Exception:
-                topic_representatives[topic_id] = []
+        topic_sizes = normalize_topic_sizes(self.topic_model.get_topic_freq())
+        topic_representatives = {
+            topic_id: self.topic_model.get_representative_docs(topic_id)[
+                : self.n_documents
+            ]
+            for topic_id in sorted(topic_sizes)
+            if topic_id != -1
+        }
 
         return {"topic_representatives": topic_representatives}

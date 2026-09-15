@@ -6,8 +6,9 @@ Usage:
 """
 
 import argparse
-import os
-import sys
+from pathlib import Path
+
+import pandas as pd
 
 from litreview import ReviewPipeline, load_config
 
@@ -16,8 +17,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run literature review pipeline: fetch -> discover -> validate -> report"
     )
-    parser.add_argument("--config", default="config.yaml", help="Config file path")
-    parser.add_argument("--fetch-zotero", action="store_true", help="Fetch from Zotero")
+    parser.add_argument(
+        "--config", type=Path, default=Path("config.yaml"), help="Config file path"
+    )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--fetch-zotero", action="store_true", help="Fetch from Zotero")
+    source.add_argument("--input", type=Path, help="Read papers from a local CSV file")
     parser.add_argument(
         "--output",
         default="data/processed/classified.csv",
@@ -36,15 +41,17 @@ def main():
     args = parser.parse_args()
 
     # Load config
-    if not os.path.exists(args.config):
-        print(f"Error: Config file '{args.config}' not found.")
-        sys.exit(1)
+    if not args.config.is_file():
+        parser.error(f"Config file '{args.config}' not found")
+    if args.input is not None and not args.input.is_file():
+        parser.error(f"Input file '{args.input}' not found")
 
     config = load_config(args.config)
+    input_df = pd.read_csv(args.input) if args.input is not None else None
 
     # Run pipeline
     pipeline = ReviewPipeline(config, skip_bertopic=args.skip_bertopic)
-    report = pipeline.run()
+    report = pipeline.run(df=input_df)
 
     # Export results
     report.export_csv(args.output)

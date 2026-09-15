@@ -2,41 +2,42 @@
 
 import os
 import tempfile
-from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from litreview.config import (
-    PipelineConfig,
-    ZoteroConfig,
     BERTopicConfig,
+    PipelineConfig,
     ZeroShotConfig,
+    ZoteroConfig,
 )
 
 
 @pytest.fixture
 def sample_df():
     """Sample DataFrame mimicking Zotero fetch output."""
-    return pd.DataFrame({
-        "Title": [
-            "Deep Learning for Fluid Dynamics",
-            "Optimization of Numerical Methods",
-            "GPU Accelerated CFD Simulations",
-            "Stochastic Models in Hydrology",
-            "Finite Volume Methods for Shallow Water",
-        ],
-        "Abstract Note": [
-            "This paper presents a deep learning approach to fluid dynamics simulations using neural networks.",
-            "We propose an optimization framework for numerical methods in computational fluid dynamics.",
-            "GPU accelerated computational fluid dynamics simulations achieve 10x speedup over CPU.",
-            "Stochastic models are used to predict hydrological events under uncertainty.",
-            "Finite volume methods are applied to shallow water equations for flood modeling.",
-        ],
-        "Publication Year": [2023, 2022, 2023, 2021, 2023],
-        "Source": ["Zotero"] * 5,
-        "Item Type": ["journalArticle"] * 5,
-    })
+    return pd.DataFrame(
+        {
+            "Title": [
+                "Deep Learning for Fluid Dynamics",
+                "Optimization of Numerical Methods",
+                "GPU Accelerated CFD Simulations",
+                "Stochastic Models in Hydrology",
+                "Finite Volume Methods for Shallow Water",
+            ],
+            "Abstract Note": [
+                "This paper presents a deep learning approach to fluid dynamics simulations using neural networks.",
+                "We propose an optimization framework for numerical methods in computational fluid dynamics.",
+                "GPU accelerated computational fluid dynamics simulations achieve 10x speedup over CPU.",
+                "Stochastic models are used to predict hydrological events under uncertainty.",
+                "Finite volume methods are applied to shallow water equations for flood modeling.",
+            ],
+            "Publication Year": [2023, 2022, 2023, 2021, 2023],
+            "Source": ["Zotero"] * 5,
+            "Item Type": ["journalArticle"] * 5,
+        }
+    )
 
 
 @pytest.fixture
@@ -47,7 +48,7 @@ def sample_config():
             library_id="test_lib",
             api_key="test_key",
             library_type="user",
-            collection_name="test_collection",
+            collection_names=["test_collection"],
         ),
         bertopic=BERTopicConfig(
             embedding_model="all-MiniLM-L6-v2",
@@ -103,6 +104,7 @@ paths:
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(content)
+        f.flush()
         yield f.name
     os.unlink(f.name)
 

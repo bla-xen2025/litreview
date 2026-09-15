@@ -18,14 +18,14 @@ Usage:
     reps_results = reps.results
 """
 
-from litreview.analyzers.bertopic.fitter import BERTopicFitter
 from litreview.analyzers.bertopic.distribution import TopicDistributionAnalyzer
-from litreview.analyzers.bertopic.words import TopicWordExtractor
+from litreview.analyzers.bertopic.fitter import BERTopicFitter
 from litreview.analyzers.bertopic.representatives import TopicRepresentativeDocs
+from litreview.analyzers.bertopic.words import TopicWordExtractor
 
 __all__ = [
     "BERTopicFitter",
     "TopicDistributionAnalyzer",
-    "TopicWordExtractor",
     "TopicRepresentativeDocs",
+    "TopicWordExtractor",
 ]

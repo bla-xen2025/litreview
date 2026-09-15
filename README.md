@@ -18,6 +18,7 @@ litreview/
 │   ├── config.py           — Configuration dataclasses
 │   └── __init__.py         — Public API
 ├── tests/                  — Unit tests
+├── examples/legacy/        — Archived v0.1 implementation (not importable as litreview)
 ├── config.yaml             — Central configuration
 ├── .env-example            — Environment variable template
 └── pyproject.toml          — Dependencies & build config
@@ -30,6 +31,7 @@ This project uses `pyproject.toml` for dependency management with [`uv`](https:/
 ```bash
 uv sync          # Install dependencies and create uv.lock
 uv pip install -e .  # Install package in development mode
+uv run python -m nltk.downloader stopwords  # Required by BERTopic preprocessing
 ```
 
 ## Usage
@@ -56,6 +58,10 @@ Or with a local CSV:
 litreview-analysis --config config.yaml --input papers.csv
 ```
 
+Exactly one input source is required: `--fetch-zotero` or `--input`. Local CSV
+files must contain `Title` and `Abstract Note`; DOI, year, source, and item type
+columns are optional.
+
 ### 3. Generate Plots
 
 ```bash
@@ -69,7 +75,10 @@ from litreview import ReviewPipeline, load_config
 
 config = load_config("config.yaml")
 pipeline = ReviewPipeline(config)
-report = pipeline.run()
+report = pipeline.run()  # fetch from Zotero
+
+# Or analyze an existing DataFrame without contacting Zotero:
+# report = pipeline.run(df=papers)
 
 # Export results
 report.export_csv("results/")

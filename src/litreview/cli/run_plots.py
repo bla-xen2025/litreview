@@ -13,13 +13,9 @@ import pandas as pd
 
 from litreview.statistics import compute_corpus_stats
 from litreview.visualization import (
-    plot_year_distribution,
     plot_source_distribution,
-    plot_topic_coverage,
-    plot_gap_analysis,
-    plot_confidence_distribution,
+    plot_year_distribution,
 )
-from litreview import load_config
 
 
 def main():

@@ -1,9 +1,10 @@
 """Configuration dataclasses and loader."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
 import yaml
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,6 +32,8 @@ class ZoteroConfig:
             val = cfg["collection_name"]
             if val is not None:
                 collections = [val] if isinstance(val, str) else val
+        elif isinstance(collections, str):
+            collections = [collections]
         return cls(
             library_id=os.environ.get("ZOTERO_LIBRARY_ID", cfg.get("library_id", "")),
             api_key=os.environ.get("ZOTERO_API_KEY", cfg.get("api_key", "")),
@@ -92,18 +95,30 @@ class BERTopicConfig:
 
     @classmethod
     def from_config(cls, cfg: dict) -> "BERTopicConfig":
-        candidate_labels = {k: v for k, v in cfg.get("candidate_labels", {}).items()}
+        candidate_labels = dict(cfg.get("candidate_labels") or {})
+        analyses = list(
+            cfg.get("analyses", ["distribution", "words", "representatives"])
+        )
+        supported_analyses = {"distribution", "words", "representatives"}
+        unknown_analyses = sorted(set(analyses) - supported_analyses)
+        if unknown_analyses:
+            raise ValueError(
+                "Unsupported BERTopic analyses: " + ", ".join(unknown_analyses)
+            )
+
         # Auto-extract seed words from candidate label descriptions
         seed_words = cfg.get("seed_words")
         if seed_words is None and candidate_labels:
             seed_words = list(candidate_labels.values())
         return cls(
             compute=cfg.get("compute", True),
-            analyses=cfg.get("analyses", ["distribution", "words", "representatives"]),
+            analyses=analyses,
             embedding_model=cfg.get("embedding_model", "all-MiniLM-L6-v2"),
             min_topic_size=cfg.get("min_topic_size", 2),
             seed_topics=cfg.get("seed_topics"),
             seed_words=seed_words,
+            umap_kwargs=dict(cfg.get("umap_kwargs") or {}),
+            hdbscan_kwargs=dict(cfg.get("hdbscan_kwargs") or {}),
             candidate_labels=candidate_labels,
             top_n_topics=cfg.get("top_n_topics", 3),
             distribution_window=cfg.get("distribution_window", 4),
@@ -124,16 +139,20 @@ class ZeroShotConfig:
     batch_size: int = 64
     candidate_labels: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not 0 <= self.threshold <= 1:
+            raise ValueError("zeroshot.threshold must be between 0 and 1")
+        if self.batch_size < 1:
+            raise ValueError("zeroshot.batch_size must be at least 1")
+
     @classmethod
     def from_config(cls, cfg: dict) -> "ZeroShotConfig":
+        default_models = cls().models
         return cls(
-            models=cfg.get(
-                "models",
-                ["facebook/bart-large-mnli", "MoritzLaurer/deberta-v3-large-zeroshot-v2.0"],
-            ),
+            models=list(cfg.get("models") or default_models),
             threshold=cfg.get("threshold", 0.5),
-            batch_size=cfg.get("batch_size", 16),
-            candidate_labels={k: v for k, v in cfg.get("candidate_labels", {}).items()},
+            batch_size=cfg.get("batch_size", 64),
+            candidate_labels=dict(cfg.get("candidate_labels") or {}),
         )
 
 
@@ -147,12 +166,22 @@ class PipelineConfig:
     @classmethod
     def from_file(cls, path: str | Path = "config.yaml") -> "PipelineConfig":
         with open(path) as f:
-            cfg = yaml.safe_load(f)
+            cfg = yaml.safe_load(f) or {}
+        if not isinstance(cfg, dict):
+            raise TypeError("Configuration root must be a YAML mapping")
+
+        # Map the pre-0.2 top-level keys while preferring the current nested schema.
+        zeroshot_cfg = dict(cfg.get("zeroshot") or {})
+        if "models" not in zeroshot_cfg and "models" in cfg:
+            zeroshot_cfg["models"] = cfg["models"]
+        if "candidate_labels" not in zeroshot_cfg and "labels" in cfg:
+            zeroshot_cfg["candidate_labels"] = cfg["labels"]
+
         return cls(
-            zotero=ZoteroConfig.from_config(cfg.get("zotero", {})),
-            bertopic=BERTopicConfig.from_config(cfg.get("bertopic", {})),
-            zeroshot=ZeroShotConfig.from_config(cfg.get("zeroshot", {})),
-            paths=cfg.get("paths", {}),
+            zotero=ZoteroConfig.from_config(cfg.get("zotero") or {}),
+            bertopic=BERTopicConfig.from_config(cfg.get("bertopic") or {}),
+            zeroshot=ZeroShotConfig.from_config(zeroshot_cfg),
+            paths=dict(cfg.get("paths") or {}),
         )
 
 

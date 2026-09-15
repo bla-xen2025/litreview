@@ -3,9 +3,13 @@ import pandas as pd
 import argparse
 import sys
 from dotenv import load_dotenv
-from litreview.analysis import unify_databases, clean_dataframe, run_classification_pipeline
-from litreview.utils import load_config
-from litreview.zotero import ZoteroFetcher
+from legacy.litreview.analysis import (
+    clean_dataframe,
+    run_classification_pipeline,
+    unify_databases,
+)
+from legacy.litreview.utils import load_config
+from legacy.litreview.zotero import ZoteroFetcher
 
 # Load .env if present (gitignored; .env-example is the template)
 load_dotenv()

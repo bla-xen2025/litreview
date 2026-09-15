@@ -1,6 +1,7 @@
 """Base class for data fetchers."""
 
 from abc import ABC, abstractmethod
+
 import pandas as pd
 
 

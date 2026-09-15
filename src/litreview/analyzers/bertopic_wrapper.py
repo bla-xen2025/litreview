@@ -18,14 +18,14 @@ to the new modules.
 
 import warnings
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from litreview.analyzers.base import Analyzer
+from litreview.analyzers.bertopic._utils import normalize_topic_sizes
 from litreview.analyzers.bertopic.fitter import BERTopicFitter
-from litreview.analyzers.bertopic.distribution import TopicDistributionAnalyzer
-from litreview.analyzers.bertopic.words import TopicWordExtractor
 from litreview.analyzers.bertopic.representatives import TopicRepresentativeDocs
+from litreview.analyzers.bertopic.words import TopicWordExtractor
 from litreview.config import BERTopicConfig
 
 
@@ -84,10 +84,18 @@ class BERTopicAnalyzer(Analyzer):
             raise RuntimeError("Must call fit() before transform()")
 
         topics, probs = self._fitter.topic_model.transform(texts.tolist())
-        return pd.DataFrame({
-            "topic": topics,
-            "topic_probability": probs.max(axis=1) if probs.ndim > 1 else 0.0,
-        })
+        if probs is None:
+            topic_probability = np.zeros(len(topics))
+        elif probs.ndim > 1:
+            topic_probability = probs.max(axis=1)
+        else:
+            topic_probability = probs
+        return pd.DataFrame(
+            {
+                "topic": topics,
+                "topic_probability": topic_probability,
+            }
+        )
 
     @property
     def results(self) -> dict:
@@ -100,28 +108,14 @@ class BERTopicAnalyzer(Analyzer):
         if self._fitter.topic_model is None or self._topics is None:
             return {}
 
-        topic_sizes = self._fitter.topic_model.get_topic_freq()
-        outlier_count = topic_sizes.get(-1, 0) if -1 in topic_sizes else 0
-
-        # Get representative documents per topic
-        topic_representatives = {}
-        for topic_id in sorted(set(self._topics)):
-            if topic_id == -1:
-                continue
-            try:
-                reps = self._fitter.topic_model.representative_documents_per_topic(
-                    topic_id, documents=[], n=3
-                )
-                topic_representatives[topic_id] = reps
-            except Exception:
-                topic_representatives[topic_id] = []
-
-        # Get topic words
-        topic_words = {}
-        for topic_id, words in self._fitter.topic_model.get_topics().items():
-            if topic_id == -1:
-                continue
-            topic_words[topic_id] = [w for w, _ in words[:10]]
+        topic_sizes = normalize_topic_sizes(self._fitter.topic_model.get_topic_freq())
+        outlier_count = topic_sizes.get(-1, 0)
+        topic_representatives = TopicRepresentativeDocs(
+            self._fitter.topic_model
+        ).results["topic_representatives"]
+        topic_words = TopicWordExtractor(self._fitter.topic_model).results[
+            "topic_words"
+        ]
 
         return {
             "topic_assignments": self._topics,
